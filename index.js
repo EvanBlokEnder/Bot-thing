@@ -1,179 +1,274 @@
-// index.js – YouTube Bot with Comment Replies
-import express from "express";
-import session from "express-session";
-import path from "path";
-import { fileURLToPath } from "url";
-import bodyParser from "body-parser";
-import { google } from "googleapis";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const {
-  GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
-  SESSION_SECRET = "strongsecret",
-  APP_URL,
-  PORT = 3000
-} = process.env;
-
-if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !APP_URL) {
-  console.error("Missing env vars.");
-  process.exit(1);
-}
-
-// OAuth client
-const oauth2Client = new google.auth.OAuth2(
-  GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
-  `${APP_URL}/oauth2callback`
-);
-
-// Scope REQUIRED for comment posting
-const SCOPES = [
-  "https://www.googleapis.com/auth/youtube.force-ssl"
-];
-
+// index.js
+const express = require("express");
+const { google } = require("googleapis");
+const fetch = require("node-fetch");
 const app = express();
-app.use(bodyParser.json());
+
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(session({
-  secret: SESSION_SECRET,
-  resave: false,
-  saveUninitialized: true
-}));
 
-// ================== LOGIN PAGE ==================
-app.get("/", (req, res) => {
-  res.send(`
-    <h1>YouTube Bot</h1>
-    ${req.session.user ? `
-      <p>Logged in as <b>${req.session.user.title}</b></p>
-      <a href="/test">Test Command</a>
-    ` : `
-      <a href="/auth">Login with Google</a>
-    `}
-  `);
-});
+// -----------------------
+// CONFIG (YOU MUST FILL THIS)
+// -----------------------
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const REDIRECT_URI = process.env.REDIRECT_URI; 
+// example render redirect: https://yourapp.onrender.com/oauth2callback
 
-// ================== AUTH ==================
-app.get("/auth", (req, res) => {
-  const url = oauth2Client.generateAuthUrl({
+let oauth = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+
+let ACCESS_TOKEN = null;
+let REFRESH_TOKEN = null;
+let LIVE_CHAT_ID = null;
+let CHANNEL_ID = null;
+
+// -----------------------
+// LOGIN BUTTON → GOOGLE AUTH URL
+// -----------------------
+app.get("/login", (req, res) => {
+  const scopes = [
+    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/youtube.force-ssl"
+  ];
+
+  const url = oauth.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent",
-    scope: SCOPES
+    scope: scopes,
+    prompt: "consent"
   });
+
   res.redirect(url);
 });
 
-// ================== OAUTH CALLBACK ==================
+// -----------------------
+// OAUTH CALLBACK
+// -----------------------
 app.get("/oauth2callback", async (req, res) => {
   try {
-    const { tokens } = await oauth2Client.getToken(req.query.code);
-    oauth2Client.setCredentials(tokens);
-    req.session.tokens = tokens;
+    const { code } = req.query;
+    const { tokens } = await oauth.getToken(code);
+    oauth.setCredentials(tokens);
 
-    const yt = google.youtube({ version: "v3", auth: oauth2Client });
+    ACCESS_TOKEN = tokens.access_token;
+    REFRESH_TOKEN = tokens.refresh_token;
+
+    console.log("✅ Login success!");
+    console.log("Access Token:", ACCESS_TOKEN);
+
+    // Fetch channel
+    const yt = google.youtube("v3");
     const me = await yt.channels.list({
-      part: "snippet,statistics",
-      mine: true
+      auth: oauth,
+      mine: true,
+      part: "id,snippet"
     });
 
-    const channel = me.data.items[0];
-    req.session.user = {
-      id: channel.id,
-      title: channel.snippet.title
-    };
+    CHANNEL_ID = me.data.items[0].id;
+    console.log("Logged into channel:", CHANNEL_ID);
 
-    res.redirect("/");
-  } catch (e) {
-    console.error(e);
-    res.send("OAuth failure.");
+    res.send(`
+      <h1>YouTube Bot Connected!</h1>
+      <p>Your channel ID: ${CHANNEL_ID}</p>
+      <a href="/find-live">Find Live Stream</a><br>
+      <a href="/send-test">Send Test Message</a>
+    `);
+  } catch (err) {
+    console.error(err);
+    res.send("OAuth Error");
   }
 });
 
-// ================== BOT COMMAND LIST ==================
-const commandList = [
-  "!hello – friendly greeting",
-  "!hi – same as hello",
-  "!ping – bot replies pong",
-  "!joke – random joke",
-  "!fact – random fact",
-  "!rate – rates user 1-10",
-  "!8ball – magic 8-ball",
-  "!vibe – vibe score",
-  "!latest – fetch latest video",
-  "!subs – subscriber count",
-  "!cmdslist – show list of commands (this)"
-].slice(0, 60); // ensure max 60 lines
+// -----------------------
+// FIND LATEST LIVE STREAM
+// -----------------------
+app.get("/find-live", async (req, res) => {
+  try {
+    const yt = google.youtube("v3");
 
-// ================== WRITE COMMENT ON YOUTUBE ==================
-async function postComment(videoId, message) {
-  const yt = google.youtube({ version: "v3", auth: oauth2Client });
+    const live = await yt.search.list({
+      auth: oauth,
+      channelId: CHANNEL_ID,
+      eventType: "live",
+      type: "video",
+      part: "id,snippet"
+    });
 
-  const resp = await yt.commentThreads.insert({
+    if (!live.data.items.length) {
+      return res.send("❌ No active live stream found!");
+    }
+
+    const videoId = live.data.items[0].id.videoId;
+
+    // Get live chat ID
+    const video = await yt.videos.list({
+      auth: oauth,
+      id: videoId,
+      part: "liveStreamingDetails"
+    });
+
+    LIVE_CHAT_ID = video.data.items[0].liveStreamingDetails.activeLiveChatId;
+
+    console.log("🎥 LIVE CHAT ID:", LIVE_CHAT_ID);
+
+    res.send(`
+      <h1>Live Chat Connected!</h1>
+      <p>Video ID: ${videoId}</p>
+      <p>Live Chat ID: ${LIVE_CHAT_ID}</p>
+      <a href="/start-bot">Start Bot</a>
+    `);
+  } catch (err) {
+    console.error(err);
+    res.send("Error finding live stream.");
+  }
+});
+
+// -----------------------
+// SEND TEST MESSAGE
+// -----------------------
+app.get("/send-test", async (req, res) => {
+  if (!LIVE_CHAT_ID) return res.send("❌ No live chat detected.");
+
+  await sendMessageToChat("test success");
+  res.send("Sent: test success");
+});
+
+// -----------------------
+// START BOT LOOP
+// -----------------------
+let botRunning = false;
+
+app.get("/start-bot", async (req, res) => {
+  if (botRunning) return res.send("Bot already running.");
+
+  botRunning = true;
+  res.send("Bot started!");
+
+  botLoop();
+});
+
+// -----------------------
+// BOT LOOP
+// -----------------------
+async function botLoop() {
+  while (botRunning) {
+    try {
+      const messages = await getChatMessages();
+      for (const msg of messages) {
+        const user = msg.authorDetails.displayName;
+        const text = msg.snippet.displayMessage;
+
+        console.log(`${user}: ${text}`);
+
+        await processCommand(user, text);
+      }
+    } catch (err) {
+      console.error("Bot Loop Error:", err);
+    }
+
+    await wait(2500);
+  }
+}
+
+// -----------------------
+// COMMAND HANDLER
+// -----------------------
+async function processCommand(user, text) {
+  const nameTag = `@${user}`;
+
+  if (text === "!cmdslist") {
+    const cmds = [
+      "!hello",
+      "!ping",
+      "!cmdslist",
+      "!random",
+      "!info",
+      "!vibe",
+      "!8ball",
+      "!rate",
+      "!pick a,b"
+    ].join("\n");
+
+    return sendMessageToChat(`${nameTag}\n\n${cmds}`);
+  }
+
+  if (text === "!hello") {
+    return sendMessageToChat(`${nameTag} Hello! 👋`);
+  }
+
+  if (text === "!ping") {
+    return sendMessageToChat(`${nameTag} pong!`);
+  }
+
+  if (text === "!info") {
+    return sendMessageToChat(`${nameTag} I am connected to channel ${CHANNEL_ID}`);
+  }
+
+  if (text === "!random") {
+    return sendMessageToChat(`${nameTag} Random: ${Math.floor(Math.random() * 99999)}`);
+  }
+
+  if (text === "!vibe") {
+    const vibes = ["🔥 HYPED", "😎 chill", "💀 tired", "🤖 robotic"];
+    const v = vibes[Math.floor(Math.random() * vibes.length)];
+    return sendMessageToChat(`${nameTag} Your vibe: ${v}`);
+  }
+
+  if (text === "!8ball") {
+    const ans = [
+      "Yes", "No", "Maybe", "Definitely", "Ask again", "No chance"
+    ];
+    return sendMessageToChat(`${nameTag} ${ans[Math.floor(Math.random() * ans.length)]}`);
+  }
+
+  if (text.startsWith("!pick ")) {
+    const parts = text.replace("!pick ", "").split(",");
+    if (parts.length === 2) {
+      const choice = parts[Math.floor(Math.random() * 2)];
+      return sendMessageToChat(`${nameTag} I pick: ${choice.trim()}`);
+    }
+  }
+}
+
+// -----------------------
+// FETCH CHAT MESSAGES
+// -----------------------
+async function getChatMessages() {
+  const yt = google.youtube("v3");
+
+  const res = await yt.liveChatMessages.list({
+    auth: oauth,
+    liveChatId: LIVE_CHAT_ID,
+    part: "snippet,authorDetails"
+  });
+
+  return res.data.items || [];
+}
+
+// -----------------------
+// SEND MESSAGE TO CHAT
+// -----------------------
+async function sendMessageToChat(msg) {
+  const yt = google.youtube("v3");
+
+  return yt.liveChatMessages.insert({
+    auth: oauth,
     part: "snippet",
     requestBody: {
       snippet: {
-        videoId,
-        topLevelComment: {
-          snippet: {
-            textOriginal: message
-          }
-        }
+        liveChatId: LIVE_CHAT_ID,
+        type: "textMessageEvent",
+        textMessageDetails: { messageText: msg }
       }
     }
   });
-
-  return resp.data;
 }
 
-// ================== TEST PAGE ==================
-app.get("/test", (req, res) => {
-  res.send(`
-    <h3>Test a Command (does not post to YouTube yet)</h3>
-    <form action="/api/command" method="POST">
-      <input name="user" placeholder="username" />
-      <input name="message" placeholder="!hello or @someone" />
-      <button>Send</button>
-    </form>
-  `);
+function wait(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+app.get("/", (req, res) => {
+  res.send(`<a href="/login">Login with Google</a>`);
 });
 
-// ================== COMMAND API ==================
-app.post("/api/command", async (req, res) => {
-  const user = req.body.user || "user";
-  const msg = (req.body.message || "").trim();
-
-  const mention = msg.startsWith("@") ? msg.split(" ")[0].substring(1) : null;
-  const cmd = msg.startsWith("!") ? msg.substring(1).toLowerCase() : null;
-
-  const responses = {
-    hello: () => `@${user} Hello! 👋`,
-    hi: () => `@${user} Hi there!`,
-    ping: () => `@${user} pong!`,
-    joke: () => `@${user} Why do programmers prefer dark mode? Because light attracts bugs.`,
-    fact: () => `@${user} Fun fact: Honey never spoils.`,
-    rate: () => `@${user} I rate you ${Math.floor(Math.random()*10)+1}/10`,
-    "8ball": () => `@${user} ${["Yes!", "No!", "Maybe...", "Ask again."][Math.floor(Math.random()*4)]}`,
-    vibe: () => `@${user} Your vibe is ${Math.floor(Math.random()*101)}% today.`,
-    cmdslist: () => commandList.join("\n")
-  };
-
-  // ================== MENTION ONLY ==================
-  if (mention && !cmd) {
-    return res.json({ reply: `@${mention} (${user} says hi!)` });
-  }
-
-  // ================== COMMAND ==================
-  if (cmd && responses[cmd]) {
-    return res.json({ reply: responses[cmd]() });
-  }
-
-  res.json({ reply: `@${user} Unknown command. Try !cmdslist` });
-});
-
-// ================== START ==================
-app.listen(PORT, () => {
-  console.log("Bot running on port", PORT);
-});
+app.listen(3000, () => console.log("Bot running on port 3000"));
