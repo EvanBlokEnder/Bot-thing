@@ -1,6 +1,5 @@
 {
   "name": "youtube-render-bot",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
