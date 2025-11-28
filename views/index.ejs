@@ -1,0 +1,38 @@
+<!-- views/index.ejs -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>YouTube Bot</title>
+</head>
+<body>
+  <h1>YouTube Bot on Render</h1>
+  <% if (user) { %>
+    <p>Logged in as: <strong><%= user.title %></strong> (subs: <%= user.subs %>)</p>
+  <% } else { %>
+    <p>Not logged in.</p>
+    <a href="/auth">Login with Google / YouTube</a>
+  <% } %>
+
+  <hr />
+  <h2>Test commands</h2>
+  <input id="user" placeholder="your username (e.g. bob)" />
+  <input id="msg" placeholder="@someone or !command" style="width:350px"/>
+  <button id="send">Send</button>
+  <pre id="out"></pre>
+
+  <script>
+    document.getElementById('send').onclick = async () => {
+      const user = document.getElementById('user').value || 'guest';
+      const message = document.getElementById('msg').value || '';
+      const res = await fetch('/api/command', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ user, message })
+      });
+      const data = await res.json();
+      document.getElementById('out').innerText = JSON.stringify(data, null, 2);
+    };
+  </script>
+</body>
+</html>
